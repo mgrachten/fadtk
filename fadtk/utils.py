@@ -3,11 +3,18 @@ import subprocess
 import numpy as np
 from typing import Union
 
+import torch
 from hypy_utils.nlp_utils import substr_between
 from hypy_utils.tqdm_utils import pmap
 
 
 PathLike = Union[str, Path]
+
+
+def ensure_tensor(x):
+    if isinstance(x, torch.Tensor):
+        return x
+    return torch.from_numpy(x)
 
 
 def _process_file(file: PathLike):
@@ -16,7 +23,9 @@ def _process_file(file: PathLike):
     return np.mean(embd, axis=0), np.cov(embd, rowvar=False) * (n - 1), n
 
 
-def calculate_embd_statistics_online(files: list[PathLike]) -> tuple[np.ndarray, np.ndarray]:
+def calculate_embd_statistics_online(
+    files: list[PathLike],
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Calculate the mean and covariance matrix of a list of embeddings in an online manner.
 
