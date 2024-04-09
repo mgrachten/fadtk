@@ -18,16 +18,20 @@ from .model_loader import ModelLoader
 from .utils import *
 
 log = setup_logger()
-sox_path = os.environ.get('SOX_PATH', 'sox')
-ffmpeg_path = os.environ.get('FFMPEG_PATH', 'ffmpeg')
+sox_path = os.environ.get("SOX_PATH", "sox")
+ffmpeg_path = os.environ.get("FFMPEG_PATH", "ffmpeg")
 TORCHAUDIO_RESAMPLING = True
 
-if not(TORCHAUDIO_RESAMPLING):
+if not (TORCHAUDIO_RESAMPLING):
     if not shutil.which(sox_path):
-        log.error(f"Could not find SoX executable at {sox_path}, please install SoX and set the SOX_PATH environment variable.")
+        log.error(
+            f"Could not find SoX executable at {sox_path}, please install SoX and set the SOX_PATH environment variable."
+        )
         exit(3)
     if not shutil.which(ffmpeg_path):
-        log.error(f"Could not find ffmpeg executable at {ffmpeg_path}, please install ffmpeg and set the FFMPEG_PATH environment variable.")
+        log.error(
+            f"Could not find ffmpeg executable at {ffmpeg_path}, please install ffmpeg and set the FFMPEG_PATH environment variable."
+        )
         exit(3)
 
 
@@ -96,7 +100,7 @@ def calc_frechet_distance(mu1, cov1, mu2, cov2, eps=1e-6):
 
 
 class FrechetAudioDistance:
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     loaded = False
 
     def __init__(self, ml: ModelLoader, audio_load_worker=8, load_model=True):
@@ -122,7 +126,7 @@ class FrechetAudioDistance:
             cache_dir.mkdir(parents=True, exist_ok=True)
             if TORCHAUDIO_RESAMPLING:
                 x, fsorig = torchaudio.load(f)
-                x = torch.mean(x,0).unsqueeze(0) # convert to mono
+                x = torch.mean(x, 0).unsqueeze(0)  # convert to mono
                 resampler = torchaudio.transforms.Resample(
                     fsorig,
                     self.ml.sr,
@@ -132,28 +136,37 @@ class FrechetAudioDistance:
                     beta=14.769656459379492,
                 )
                 y = resampler(x)
-                torchaudio.save(new, y, self.ml.sr, encoding="PCM_S", bits_per_sample=16)
-            else:                
-                sox_args = ['-r', str(self.ml.sr), '-c', '1', '-b', '16']
-    
+                torchaudio.save(
+                    new, y, self.ml.sr, encoding="PCM_S", bits_per_sample=16
+                )
+            else:
+                sox_args = ["-r", str(self.ml.sr), "-c", "1", "-b", "16"]
+
                 # ffmpeg has bad resampling compared to SoX
                 # SoX has bad format support compared to ffmpeg
                 # If the file format is not supported by SoX, use ffmpeg to convert it to wav
-    
+
                 if f.suffix[1:] not in self.sox_formats:
                     # Use ffmpeg for format conversion and then pipe to sox for resampling
                     with tempfile.TemporaryDirectory() as tmp:
-                        tmp = Path(tmp) / 'temp.wav'
-    
+                        tmp = Path(tmp) / "temp.wav"
+
                         # Open ffmpeg process for format conversion
-                        subprocess.run([
-                            ffmpeg_path, 
-                            "-hide_banner", "-loglevel", "error", 
-                            "-i", f, tmp])
-                        
+                        subprocess.run(
+                            [
+                                ffmpeg_path,
+                                "-hide_banner",
+                                "-loglevel",
+                                "error",
+                                "-i",
+                                f,
+                                tmp,
+                            ]
+                        )
+
                         # Open sox process for resampling, taking input from ffmpeg's output
                         subprocess.run([sox_path, tmp, *sox_args, new])
-                        
+
                 else:
                     # Use sox for resampling
                     subprocess.run([sox_path, f, *sox_args, new])
@@ -180,10 +193,14 @@ class FrechetAudioDistance:
         Read embedding from a cached file.
         """
         cache = get_cache_embedding_path(self.ml.name, audio_dir)
-        assert cache.exists(), f"Embedding file {cache} does not exist, please run cache_embedding_file first."
+        assert (
+            cache.exists()
+        ), f"Embedding file {cache} does not exist, please run cache_embedding_file first."
         return np.load(cache)
-    
-    def load_embeddings(self, dir: Union[str, Path], max_count: int = -1, concat: bool = True):
+
+    def load_embeddings(
+        self, dir: Union[str, Path], max_count: int = -1, concat: bool = True
+    ):
         """
         Load embeddings for all audio files in a directory.
         """
@@ -192,7 +209,9 @@ class FrechetAudioDistance:
 
         return self._load_embeddings(files, max_count=max_count, concat=concat)
 
-    def _load_embeddings(self, files: list[Path], max_count: int = -1, concat: bool = True):
+    def _load_embeddings(
+        self, files: list[Path], max_count: int = -1, concat: bool = True
+    ):
         """
         Load embeddings for a list of audio files.
         """
@@ -201,7 +220,12 @@ class FrechetAudioDistance:
 
         # Load embeddings
         if max_count == -1:
-            embd_lst = tmap(self.read_embedding_file, files, desc="Loading audio files...", max_workers=self.audio_load_worker)
+            embd_lst = tmap(
+                self.read_embedding_file,
+                files,
+                desc="Loading audio files...",
+                max_workers=self.audio_load_worker,
+            )
         else:
             total_len = 0
             embd_lst = []
@@ -210,13 +234,13 @@ class FrechetAudioDistance:
                 total_len += embd_lst[-1].shape[0]
                 if total_len > max_count:
                     break
-        
+
         # Concatenate embeddings if needed
         if concat:
             return np.concatenate(embd_lst, axis=0)
         else:
             return embd_lst, files
-    
+
     def load_stats(self, path: PathLike):
         """
         Load embedding statistics from a directory.
@@ -236,9 +260,14 @@ class FrechetAudioDistance:
             # Load it as a npz
             log.info(f"Loading embedding statistics from {path}...")
             with np.load(path) as data:
-                if f'{self.ml.name}.mu' not in data or f'{self.ml.name}.cov' not in data:
-                    raise ValueError(f"FAD statistics file {path} doesn't contain data for model {self.ml.name}")
-                return data[f'{self.ml.name}.mu'], data[f'{self.ml.name}.cov']
+                if (
+                    f"{self.ml.name}.mu" not in data
+                    or f"{self.ml.name}.cov" not in data
+                ):
+                    raise ValueError(
+                        f"FAD statistics file {path} doesn't contain data for model {self.ml.name}"
+                    )
+                return data[f"{self.ml.name}.mu"], data[f"{self.ml.name}.cov"]
 
         cache_dir = path / "stats" / self.ml.name
         emb_dir = path / "embeddings" / self.ml.name
@@ -247,13 +276,15 @@ class FrechetAudioDistance:
             mu = np.load(cache_dir / "mu.npy")
             cov = np.load(cache_dir / "cov.npy")
             return mu, cov
-        
+
         if not path.is_dir():
-            log.error(f"The dataset you want to use ({path}) is not a directory nor a file.")
+            log.error(
+                f"The dataset you want to use ({path}) is not a directory nor a file."
+            )
             exit(1)
 
         log.info(f"Loading embedding files from {path}...")
-        
+
         mu, cov = calculate_embd_statistics_online(list(emb_dir.glob("*.npy")))
         log.info("> Embeddings statistics calculated.")
 
@@ -261,7 +292,7 @@ class FrechetAudioDistance:
         cache_dir.mkdir(parents=True, exist_ok=True)
         np.save(cache_dir / "mu.npy", mu)
         np.save(cache_dir / "cov.npy", cov)
-        
+
         return mu, cov
 
     def score(self, baseline: PathLike, eval: PathLike):
@@ -276,7 +307,14 @@ class FrechetAudioDistance:
 
         return calc_frechet_distance(mu_bg, cov_bg, mu_eval, cov_eval)
 
-    def score_inf(self, baseline: PathLike, eval_files: list[Path], steps: int = 25, min_n = 500, raw: bool = False):
+    def score_inf(
+        self,
+        baseline: PathLike,
+        eval_files: list[Path],
+        steps: int = 25,
+        min_n=500,
+        raw: bool = False,
+    ):
         """
         Calculate FAD for different n (number of samples) and compute FAD-inf.
 
@@ -290,24 +328,24 @@ class FrechetAudioDistance:
         # 1. Load background embeddings
         mu_base, cov_base = self.load_stats(baseline)
         # If all of the embedding files end in .npy, we can load them directly
-        if all([f.suffix == '.npy' for f in eval_files]):
+        if all([f.suffix == ".npy" for f in eval_files]):
             embeds = [np.load(f) for f in eval_files]
             embeds = np.concatenate(embeds, axis=0)
         else:
             embeds = self._load_embeddings(eval_files, concat=True)
-        
+
         # Calculate maximum n
         max_n = len(embeds)
 
         # Generate list of ns to use
         ns = [int(n) for n in np.linspace(min_n, max_n, steps)]
-        
+
         results = []
         for n in tq(ns, desc="Calculating FAD-inf"):
             # Select n feature frames randomly (with replacement)
             indices = np.random.choice(embeds.shape[0], size=n, replace=True)
             embds_eval = embeds[indices]
-            
+
             mu_eval, cov_eval = calc_embd_statistics(embds_eval)
             fad_score = calc_frechet_distance(mu_base, cov_base, mu_eval, cov_eval)
 
@@ -320,12 +358,16 @@ class FrechetAudioDistance:
         slope, intercept = np.polyfit(xs, ys[:, 1], 1)
 
         # Compute R^2
-        r2 = 1 - np.sum((ys[:, 1] - (slope * xs + intercept)) ** 2) / np.sum((ys[:, 1] - np.mean(ys[:, 1])) ** 2)
+        r2 = 1 - np.sum((ys[:, 1] - (slope * xs + intercept)) ** 2) / np.sum(
+            (ys[:, 1] - np.mean(ys[:, 1])) ** 2
+        )
 
         # Since intercept is the FAD-inf, we can just return it
         return FADInfResults(score=intercept, slope=slope, r2=r2, points=results)
-    
-    def score_individual(self, baseline: PathLike, eval_dir: PathLike, csv_name: Union[Path, str]) -> Path:
+
+    def score_individual(
+        self, baseline: PathLike, eval_dir: PathLike, csv_name: Union[Path, str]
+    ) -> Path:
         """
         Calculate the FAD score for each individual file in eval_dir and write the results to a csv file.
 
@@ -336,7 +378,7 @@ class FrechetAudioDistance:
         """
         csv = Path(csv_name)
         if isinstance(csv_name, str):
-            csv = Path('data') / f'fad-individual' / self.ml.name / csv_name
+            csv = Path("data") / f"fad-individual" / self.ml.name / csv_name
         if csv.exists():
             log.info(f"CSV file {csv} already exists, exiting...")
             return csv
@@ -354,17 +396,29 @@ class FrechetAudioDistance:
 
             except Exception as e:
                 traceback.print_exc()
-                log.error(f"An error occurred calculating individual FAD using model {self.ml.name} on file {f}")
+                log.error(
+                    f"An error occurred calculating individual FAD using model {self.ml.name} on file {f}"
+                )
                 log.error(e)
 
         # 3. Calculate z score for each eval file
         _files = list(Path(eval_dir).glob("*.*"))
-        scores = tmap(_find_z_helper, _files, desc=f"Calculating scores", max_workers=self.audio_load_worker)
+        scores = tmap(
+            _find_z_helper,
+            _files,
+            desc=f"Calculating scores",
+            max_workers=self.audio_load_worker,
+        )
 
         # 4. Write the sorted z scores to csv
         pairs = list(zip(_files, scores))
         pairs = [p for p in pairs if p[1] is not None]
         pairs = sorted(pairs, key=lambda x: np.abs(x[1]))
-        write(csv, "\n".join([",".join([str(x).replace(',', '_') for x in row]) for row in pairs]))
+        write(
+            csv,
+            "\n".join(
+                [",".join([str(x).replace(",", "_") for x in row]) for row in pairs]
+            ),
+        )
 
         return csv

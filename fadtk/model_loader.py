@@ -21,19 +21,22 @@ class ModelLoader(ABC):
     """
     Abstract class for loading a model and getting embeddings from it. The model should be loaded in the `load_model` method.
     """
+
     def __init__(self, name: str, num_features: int, sr: int):
         self.model = None
         self.sr = sr
         self.num_features = num_features
         self.name = name
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
 
     def get_embedding(self, audio: np.ndarray):
         embd = self._get_embedding(audio)
-        if self.device == torch.device('cuda'):
+        if self.device == torch.device("cuda"):
             embd = embd.cpu()
         embd = embd.detach().numpy()
-        
+
         # If embedding is float32, convert to float16 to be space-efficient
         if embd.dtype == np.float32:
             embd = embd.astype(np.float16)
@@ -52,7 +55,7 @@ class ModelLoader(ABC):
         pass
 
     def load_wav(self, wav_file: Path):
-        wav_data, _ = soundfile.read(wav_file, dtype='int16')
+        wav_data, _ = soundfile.read(wav_file, dtype="int16")
         wav_data = wav_data / 32768.0  # Convert to [-1.0, +1.0]
 
         return wav_data
@@ -62,23 +65,26 @@ class VGGishModel(ModelLoader):
     """
     S. Hershey et al., "CNN Architectures for Large-Scale Audio Classification", ICASSP 2017
     """
+
     def __init__(self, use_pca=False, use_activation=False):
         super().__init__("vggish", 128, 16000)
         self.use_pca = use_pca
         self.use_activation = use_activation
 
     def load_model(self):
-        self.model = torch.hub.load('harritaylor/torchvggish', 'vggish')
+        self.model = torch.hub.load("harritaylor/torchvggish", "vggish")
         if not self.use_pca:
             self.model.postprocess = False
         if not self.use_activation:
-            self.model.embeddings = nn.Sequential(*list(self.model.embeddings.children())[:-1])
+            self.model.embeddings = nn.Sequential(
+                *list(self.model.embeddings.children())[:-1]
+            )
         self.model.eval()
         self.model.to(self.device)
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         return self.model.forward(audio, self.sr)
-        
+
 
 class EncodecEmbModel(ModelLoader):
     """
@@ -86,14 +92,19 @@ class EncodecEmbModel(ModelLoader):
 
     Thiss version uses the embedding outputs (continuous values of 128 features).
     """
-    def __init__(self, variant: Literal['48k', '24k'] = '24k'):
-        super().__init__('encodec-emb' if variant == '24k' else f"encodec-emb-{variant}", 128,
-                         sr=24000 if variant == '24k' else 48000)
+
+    def __init__(self, variant: Literal["48k", "24k"] = "24k"):
+        super().__init__(
+            "encodec-emb" if variant == "24k" else f"encodec-emb-{variant}",
+            128,
+            sr=24000 if variant == "24k" else 48000,
+        )
         self.variant = variant
 
     def load_model(self):
         from encodec import EncodecModel
-        if self.variant == '48k':
+
+        if self.variant == "48k":
             self.model = EncodecModel.encodec_model_48khz()
             self.model.set_target_bandwidth(24)
         else:
@@ -103,11 +114,11 @@ class EncodecEmbModel(ModelLoader):
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         segment_length = self.model.segment_length
-        
+
         # The 24k model doesn't use segmenting
         if segment_length is None:
             return self._get_frame(audio)
-        
+
         # The 48k model uses segmenting
         assert audio.dim() == 3
         _, channels, length = audio.shape
@@ -116,24 +127,26 @@ class EncodecEmbModel(ModelLoader):
 
         encoded_frames: list[torch.Tensor] = []
         for offset in range(0, length, stride):
-            frame = audio[:, :, offset:offset + segment_length]
+            frame = audio[:, :, offset : offset + segment_length]
             encoded_frames.append(self._get_frame(frame))
 
         # Concatenate
-        encoded_frames = torch.cat(encoded_frames, dim=0) # [timeframes, 128]
+        encoded_frames = torch.cat(encoded_frames, dim=0)  # [timeframes, 128]
         return encoded_frames
 
     def _get_frame(self, audio: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             length = audio.shape[-1]
             duration = length / self.sr
-            assert self.model.segment is None or duration <= 1e-5 + self.model.segment, f"Audio is too long ({duration} > {self.model.segment})"
+            assert (
+                self.model.segment is None or duration <= 1e-5 + self.model.segment
+            ), f"Audio is too long ({duration} > {self.model.segment})"
 
-            emb = self.model.encoder(audio.to(self.device)) # [1, 128, timeframes]
-            emb = emb[0] # [128, timeframes]
-            emb = emb.transpose(0, 1) # [timeframes, 128]
+            emb = self.model.encoder(audio.to(self.device))  # [1, 128, timeframes]
+            emb = emb[0]  # [128, timeframes]
+            emb = emb.transpose(0, 1)  # [timeframes, 128]
             return emb
-    
+
     def load_wav(self, wav_file: Path):
         import torchaudio
         from encodec.utils import convert_audio
@@ -143,17 +156,17 @@ class EncodecEmbModel(ModelLoader):
 
         # If it's longer than 3 minutes, cut it
         if wav.shape[1] > 3 * 60 * self.sr:
-            wav = wav[:, :3 * 60 * self.sr]
+            wav = wav[:, : 3 * 60 * self.sr]
 
         return wav.unsqueeze(0)
-        
+
     def _decode_frame(self, emb: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            emb = torch.from_numpy(emb).float().to(self.device) # [timeframes, 128]
-            emb = emb.transpose(0, 1) # [128, timeframes]
-            emb = emb.unsqueeze(0) # [1, 128, timeframes]
-            audio = self.model.decoder(emb) # [1, 1, timeframes]
-            audio = audio[0, 0] # [timeframes]
+            emb = torch.from_numpy(emb).float().to(self.device)  # [timeframes, 128]
+            emb = emb.transpose(0, 1)  # [128, timeframes]
+            emb = emb.unsqueeze(0)  # [1, 128, timeframes]
+            audio = self.model.decoder(emb)  # [1, 1, timeframes]
+            audio = audio[0, 0]  # [timeframes]
 
             return audio.cpu().numpy()
 
@@ -164,12 +177,14 @@ class DACModel(ModelLoader):
 
     pip install descript-audio-codec
     """
+
     def __init__(self):
         super().__init__("dac-44kHz", 1024, 44100)
 
     def load_model(self):
         from dac.utils import load_model
-        self.model = load_model(tag='latest', model_type='44khz')
+
+        self.model = load_model(tag="latest", model_type="44khz")
         self.model.eval()
         self.model.to(self.device)
 
@@ -201,25 +216,35 @@ class DACModel(ModelLoader):
         audio.zero_pad_to(int(pad_length * self.sr))
         audio = audio.collect_windows(win_len, hop_len)
 
-        print(win_len, hop_len, audio.batch_size, f"(processed in {(time.time() - stime) * 1000:.0f}ms)")
+        print(
+            win_len,
+            hop_len,
+            audio.batch_size,
+            f"(processed in {(time.time() - stime) * 1000:.0f}ms)",
+        )
         stime = time.time()
 
         emb = []
         for i in range(audio.batch_size):
             signal_from_batch = AudioSignal(audio.audio_data[i, ...], self.sr)
             signal_from_batch.to(self.device)
-            e1 = self.model.encoder(signal_from_batch.audio_data).cpu() # [1, 1024, timeframes]
-            e1 = e1[0] # [1024, timeframes]
-            e1 = e1.transpose(0, 1) # [timeframes, 1024]
+            e1 = self.model.encoder(
+                signal_from_batch.audio_data
+            ).cpu()  # [1, 1024, timeframes]
+            e1 = e1[0]  # [1024, timeframes]
+            e1 = e1.transpose(0, 1)  # [timeframes, 1024]
             emb.append(e1)
 
         emb = torch.cat(emb, dim=0)
-        print(emb.shape, f'(computing finished in {(time.time() - stime) * 1000:.0f}ms)')
+        print(
+            emb.shape, f"(computing finished in {(time.time() - stime) * 1000:.0f}ms)"
+        )
 
         return emb
 
     def load_wav(self, wav_file: Path):
         from audiotools import AudioSignal
+
         return AudioSignal(wav_file)
 
 
@@ -229,32 +254,45 @@ class MERTModel(ModelLoader):
 
     Please specify the layer to use (1-12).
     """
-    def __init__(self, size='v1-95M', layer=12, limit_minutes=6):
-        super().__init__(f"MERT-{size}" + ("" if layer == 12 else f"-{layer}"), 768, 24000)
+
+    def __init__(self, size="v1-95M", layer=12, limit_minutes=6):
+        super().__init__(
+            f"MERT-{size}" + ("" if layer == 12 else f"-{layer}"), 768, 24000
+        )
         self.huggingface_id = f"m-a-p/MERT-{size}"
         self.layer = layer
         self.limit = limit_minutes * 60 * self.sr
-        
+
     def load_model(self):
         from transformers import Wav2Vec2FeatureExtractor
         from transformers import AutoModel
-        
-        self.model = AutoModel.from_pretrained(self.huggingface_id, trust_remote_code=True)
-        self.processor = Wav2Vec2FeatureExtractor.from_pretrained(self.huggingface_id, trust_remote_code=True)
+
+        self.model = AutoModel.from_pretrained(
+            self.huggingface_id, trust_remote_code=True
+        )
+        self.processor = Wav2Vec2FeatureExtractor.from_pretrained(
+            self.huggingface_id, trust_remote_code=True
+        )
         # self.sr = self.processor.sampling_rate
         self.model.to(self.device)
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         # Limit to 9 minutes
         if audio.shape[0] > self.limit:
-            log.warning(f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating.")
-            audio = audio[:self.limit]
+            log.warning(
+                f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating."
+            )
+            audio = audio[: self.limit]
 
-        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(
+            self.device
+        )
         with torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
-            out = torch.stack(out.hidden_states).squeeze() # [13 layers, timeframes, 768]
-            out = out[self.layer] # [timeframes, 768]
+            out = torch.stack(
+                out.hidden_states
+            ).squeeze()  # [13 layers, timeframes, 768]
+            out = out[self.layer]  # [timeframes, 768]
 
         return out
 
@@ -263,23 +301,25 @@ class CLAPLaionModel(ModelLoader):
     """
     CLAP model from https://github.com/LAION-AI/CLAP
     """
-    
-    def __init__(self, type: Literal['audio', 'music']):
+
+    def __init__(self, type: Literal["audio", "music"]):
         super().__init__(f"clap-laion-{type}", 512, 48000)
         self.type = type
 
-        if type == 'audio':
-            url = 'https://huggingface.co/lukewys/laion_clap/resolve/main/630k-audioset-best.pt'
-        elif type == 'music':
-            url = 'https://huggingface.co/lukewys/laion_clap/resolve/main/music_audioset_epoch_15_esc_90.14.pt'
+        if type == "audio":
+            url = "https://huggingface.co/lukewys/laion_clap/resolve/main/630k-audioset-best.pt"
+        elif type == "music":
+            url = "https://huggingface.co/lukewys/laion_clap/resolve/main/music_audioset_epoch_15_esc_90.14.pt"
 
-        self.model_file = Path(__file__).parent / ".model-checkpoints" / url.split('/')[-1]
+        self.model_file = (
+            Path(__file__).parent / ".model-checkpoints" / url.split("/")[-1]
+        )
 
         # Download file if it doesn't exist
         if not self.model_file.exists():
             self.model_file.parent.mkdir(parents=True, exist_ok=True)
             download_file(url, self.model_file)
-            
+
         # Patch the model file to remove position_ids (will raise an error otherwise)
         self.patch_model_430(self.model_file)
 
@@ -293,10 +333,10 @@ class CLAPLaionModel(ModelLoader):
         patched = file.parent / f"{file.name}.patched.430"
         if patched.exists():
             return
-        
+
         OFFENDING_KEY = "module.text_branch.embeddings.position_ids"
         log.warning("Patching LAION-CLAP's model checkpoints")
-        
+
         # Load the checkpoint from the given path
         checkpoint = torch.load(file, map_location="cpu")
 
@@ -317,14 +357,17 @@ class CLAPLaionModel(ModelLoader):
         # Save the modified checkpoint
         torch.save(checkpoint, file)
         log.warning(f"Saved patched checkpoint to {file}")
-        
+
         # Create a "patched" file when patching is done
         patched.touch()
-        
+
     def load_model(self):
         import laion_clap
 
-        self.model = laion_clap.CLAP_Module(enable_fusion=False, amodel='HTSAT-tiny' if self.type == 'audio' else 'HTSAT-base')
+        self.model = laion_clap.CLAP_Module(
+            enable_fusion=False,
+            amodel="HTSAT-tiny" if self.type == "audio" else "HTSAT-base",
+        )
         self.model.load_ckpt(self.model_file)
         self.model.to(self.device)
 
@@ -337,40 +380,48 @@ class CLAPLaionModel(ModelLoader):
         # Split the audio into 10s chunks with 1s hop
         chunk_size = 10 * self.sr  # 10 seconds
         hop_size = self.sr  # 1 second
-        chunks = [audio[:, i:i+chunk_size] for i in range(0, audio.shape[1], hop_size)]
+        chunks = [
+            audio[:, i : i + chunk_size] for i in range(0, audio.shape[1], hop_size)
+        ]
 
         # Calculate embeddings for each chunk
         embeddings = []
         for chunk in chunks:
             with torch.no_grad():
-                chunk = chunk if chunk.shape[1] == chunk_size else np.pad(chunk, ((0,0), (0, chunk_size-chunk.shape[1])))
+                chunk = (
+                    chunk
+                    if chunk.shape[1] == chunk_size
+                    else np.pad(chunk, ((0, 0), (0, chunk_size - chunk.shape[1])))
+                )
                 chunk = torch.from_numpy(chunk).float().to(self.device)
-                emb = self.model.get_audio_embedding_from_data(x = chunk, use_tensor=True)
+                emb = self.model.get_audio_embedding_from_data(x=chunk, use_tensor=True)
                 embeddings.append(emb)
 
         # Concatenate the embeddings
-        emb = torch.cat(embeddings, dim=0) # [timeframes, 512]
+        emb = torch.cat(embeddings, dim=0)  # [timeframes, 512]
         return emb
 
     def int16_to_float32(self, x):
         return (x / 32767.0).astype(np.float32)
 
     def float32_to_int16(self, x):
-        x = np.clip(x, a_min=-1., a_max=1.)
-        return (x * 32767.).astype(np.int16)
+        x = np.clip(x, a_min=-1.0, a_max=1.0)
+        return (x * 32767.0).astype(np.int16)
 
 
 class CdpamModel(ModelLoader):
     """
     CDPAM model from https://github.com/pranaymanocha/PerceptualAudio/tree/master/cdpam
     """
-    def __init__(self, mode: Literal['acoustic', 'content']) -> None:
+
+    def __init__(self, mode: Literal["acoustic", "content"]) -> None:
         super().__init__(f"cdpam-{mode}", 512, 22050)
         self.mode = mode
-        assert mode in ['acoustic', 'content'], "Mode must be 'acoustic' or 'content'"
+        assert mode in ["acoustic", "content"], "Mode must be 'acoustic' or 'content'"
 
     def load_model(self):
         from cdpam import CDPAM
+
         self.model = CDPAM(dev=self.device)
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
@@ -380,25 +431,27 @@ class CdpamModel(ModelLoader):
         chunk_size = self.sr
         frames = []
         for i in range(0, audio.shape[1], chunk_size):
-            chunk = audio[:, i:i+chunk_size]
-            _, acoustic, content = self.model.model.base_encoder.forward(chunk.unsqueeze(1))
-            v = acoustic if self.mode == 'acoustic' else content
+            chunk = audio[:, i : i + chunk_size]
+            _, acoustic, content = self.model.model.base_encoder.forward(
+                chunk.unsqueeze(1)
+            )
+            v = acoustic if self.mode == "acoustic" else content
             v = F.normalize(v, dim=1)
             frames.append(v)
 
         # Concatenate the embeddings
-        emb = torch.cat(frames, dim=0) # [timeframes, 512]
+        emb = torch.cat(frames, dim=0)  # [timeframes, 512]
         return emb
 
     def load_wav(self, wav_file: Path):
-        x, _  = librosa.load(wav_file, sr=self.sr)
-        
+        x, _ = librosa.load(wav_file, sr=self.sr)
+
         # Convert to 16 bit floating point
         x = np.round(x.astype(np.float) * 32768)
-        x  = np.reshape(x, [-1, 1])
+        x = np.reshape(x, [-1, 1])
         x = np.reshape(x, [1, x.shape[0]])
-        x  = np.float32(x)
-        
+        x = np.float32(x)
+
         return x
 
 
@@ -406,14 +459,17 @@ class CLAPModel(ModelLoader):
     """
     CLAP model from https://github.com/microsoft/CLAP
     """
-    def __init__(self, type: Literal['2023']):
+
+    def __init__(self, type: Literal["2023"]):
         super().__init__(f"clap-{type}", 1024, 44100)
         self.type = type
 
-        if type == '2023':
-            url = 'https://huggingface.co/microsoft/msclap/resolve/main/CLAP_weights_2023.pth'
+        if type == "2023":
+            url = "https://huggingface.co/microsoft/msclap/resolve/main/CLAP_weights_2023.pth"
 
-        self.model_file = Path(__file__).parent / ".model-checkpoints" / url.split('/')[-1]
+        self.model_file = (
+            Path(__file__).parent / ".model-checkpoints" / url.split("/")[-1]
+        )
 
         # Download file if it doesn't exist
         if not self.model_file.exists():
@@ -422,24 +478,32 @@ class CLAPModel(ModelLoader):
 
     def load_model(self):
         from msclap import CLAP
-        
-        self.model = CLAP(self.model_file, version = self.type, use_cuda=self.device == torch.device('cuda'))
-        #self.model.to(self.device)
+
+        self.model = CLAP(
+            self.model_file,
+            version=self.type,
+            use_cuda=self.device == torch.device("cuda"),
+        )
+        # self.model.to(self.device)
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         audio = audio.reshape(1, -1)
 
         # The int16-float32 conversion is used for quantization
-        #audio = self.int16_to_float32(self.float32_to_int16(audio))
+        # audio = self.int16_to_float32(self.float32_to_int16(audio))
 
         # Split the audio into 7s chunks with 1s hop
         chunk_size = 7 * self.sr  # 10 seconds
         hop_size = self.sr  # 1 second
-        chunks = [audio[:, i:i+chunk_size] for i in range(0, audio.shape[1], hop_size)]
+        chunks = [
+            audio[:, i : i + chunk_size] for i in range(0, audio.shape[1], hop_size)
+        ]
 
         # zero-pad chunks to make equal length
         clen = [x.shape[1] for x in chunks]
-        chunks = [np.pad(ch, ((0,0), (0,np.max(clen) - ch.shape[1]))) for ch in chunks]
+        chunks = [
+            np.pad(ch, ((0, 0), (0, np.max(clen) - ch.shape[1]))) for ch in chunks
+        ]
 
         self.model.default_collate(chunks)
 
@@ -447,21 +511,25 @@ class CLAPModel(ModelLoader):
         embeddings = []
         for chunk in chunks:
             with torch.no_grad():
-                chunk = chunk if chunk.shape[1] == chunk_size else np.pad(chunk, ((0,0), (0, chunk_size-chunk.shape[1])))
+                chunk = (
+                    chunk
+                    if chunk.shape[1] == chunk_size
+                    else np.pad(chunk, ((0, 0), (0, chunk_size - chunk.shape[1])))
+                )
                 chunk = torch.from_numpy(chunk).float().to(self.device)
                 emb = self.model.clap.audio_encoder(chunk)[0]
                 embeddings.append(emb)
 
         # Concatenate the embeddings
-        emb = torch.cat(embeddings, dim=0) # [timeframes, 1024]
+        emb = torch.cat(embeddings, dim=0)  # [timeframes, 1024]
         return emb
 
     def int16_to_float32(self, x):
         return (x / 32767.0).astype(np.float32)
 
     def float32_to_int16(self, x):
-        x = np.clip(x, a_min=-1., a_max=1.)
-        return (x * 32767.).astype(np.int16)
+        x = np.clip(x, a_min=-1.0, a_max=1.0)
+        return (x * 32767.0).astype(np.int16)
 
 
 class W2V2Model(ModelLoader):
@@ -470,9 +538,19 @@ class W2V2Model(ModelLoader):
 
     Please specify the size ('base' or 'large') and the layer to use (1-12 for 'base' or 1-24 for 'large').
     """
-    def __init__(self, size: Literal['base', 'large'], layer: Literal['12', '24'], limit_minutes=6):
-        model_dim = 768 if size == 'base' else 1024
-        model_identifier = f"w2v2-{size}" + ("" if (layer == 12 and size == 'base') or (layer == 24 and size == 'large') else f"-{layer}")
+
+    def __init__(
+        self,
+        size: Literal["base", "large"],
+        layer: Literal["12", "24"],
+        limit_minutes=6,
+    ):
+        model_dim = 768 if size == "base" else 1024
+        model_identifier = f"w2v2-{size}" + (
+            ""
+            if (layer == 12 and size == "base") or (layer == 24 and size == "large")
+            else f"-{layer}"
+        )
 
         super().__init__(model_identifier, model_dim, 16000)
         self.huggingface_id = f"facebook/wav2vec2-{size}-960h"
@@ -481,7 +559,7 @@ class W2V2Model(ModelLoader):
 
     def load_model(self):
         from transformers import AutoProcessor, Wav2Vec2Model
-        
+
         self.model = Wav2Vec2Model.from_pretrained(self.huggingface_id)
         self.processor = AutoProcessor.from_pretrained(self.huggingface_id)
         self.model.to(self.device)
@@ -489,13 +567,19 @@ class W2V2Model(ModelLoader):
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         # Limit to specified minutes
         if audio.shape[0] > self.limit:
-            log.warning(f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating.")
-            audio = audio[:self.limit]
+            log.warning(
+                f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating."
+            )
+            audio = audio[: self.limit]
 
-        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(
+            self.device
+        )
         with torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
-            out = torch.stack(out.hidden_states).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
+            out = torch.stack(
+                out.hidden_states
+            ).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
             out = out[self.layer]  # [timeframes, 768 or 1024]
 
         return out
@@ -507,9 +591,19 @@ class HuBERTModel(ModelLoader):
 
     Please specify the size ('base' or 'large') and the layer to use (1-12 for 'base' or 1-24 for 'large').
     """
-    def __init__(self, size: Literal['base', 'large'], layer: Literal['12', '24'], limit_minutes=6):
-        model_dim = 768 if size == 'base' else 1024
-        model_identifier = f"hubert-{size}" + ("" if (layer == 12 and size == 'base') or (layer == 24 and size == 'large') else f"-{layer}")
+
+    def __init__(
+        self,
+        size: Literal["base", "large"],
+        layer: Literal["12", "24"],
+        limit_minutes=6,
+    ):
+        model_dim = 768 if size == "base" else 1024
+        model_identifier = f"hubert-{size}" + (
+            ""
+            if (layer == 12 and size == "base") or (layer == 24 and size == "large")
+            else f"-{layer}"
+        )
 
         super().__init__(model_identifier, model_dim, 16000)
         self.huggingface_id = f"facebook/hubert-{size}-ls960"
@@ -526,13 +620,19 @@ class HuBERTModel(ModelLoader):
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         # Limit to specified minutes
         if audio.shape[0] > self.limit:
-            log.warning(f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating.")
-            audio = audio[:self.limit]
+            log.warning(
+                f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating."
+            )
+            audio = audio[: self.limit]
 
-        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(
+            self.device
+        )
         with torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
-            out = torch.stack(out.hidden_states).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
+            out = torch.stack(
+                out.hidden_states
+            ).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
             out = out[self.layer]  # [timeframes, 768 or 1024]
 
         return out
@@ -544,9 +644,20 @@ class WavLMModel(ModelLoader):
 
     Please specify the model size ('base', 'base-plus', or 'large') and the layer to use (1-12 for 'base' or 'base-plus' and 1-24 for 'large').
     """
-    def __init__(self, size: Literal['base', 'base-plus', 'large'], layer: Literal['12', '24'], limit_minutes=6):
-        model_dim = 768 if size in ['base', 'base-plus'] else 1024
-        model_identifier = f"wavlm-{size}" + ("" if (layer == 12 and size in ['base', 'base-plus']) or (layer == 24 and size == 'large') else f"-{layer}")
+
+    def __init__(
+        self,
+        size: Literal["base", "base-plus", "large"],
+        layer: Literal["12", "24"],
+        limit_minutes=6,
+    ):
+        model_dim = 768 if size in ["base", "base-plus"] else 1024
+        model_identifier = f"wavlm-{size}" + (
+            ""
+            if (layer == 12 and size in ["base", "base-plus"])
+            or (layer == 24 and size == "large")
+            else f"-{layer}"
+        )
 
         super().__init__(model_identifier, model_dim, 16000)
         self.huggingface_id = f"patrickvonplaten/wavlm-libri-clean-100h-{size}"
@@ -563,13 +674,19 @@ class WavLMModel(ModelLoader):
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
         # Limit to specified minutes
         if audio.shape[0] > self.limit:
-            log.warning(f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating.")
-            audio = audio[:self.limit]
+            log.warning(
+                f"Audio is too long ({audio.shape[0] / self.sr / 60:.2f} minutes > {self.limit / self.sr / 60:.2f} minutes). Truncating."
+            )
+            audio = audio[: self.limit]
 
-        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        inputs = self.processor(audio, sampling_rate=self.sr, return_tensors="pt").to(
+            self.device
+        )
         with torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
-            out = torch.stack(out.hidden_states).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
+            out = torch.stack(
+                out.hidden_states
+            ).squeeze()  # [13 or 25 layers, timeframes, 768 or 1024]
             out = out[self.layer]  # [timeframes, 768 or 1024]
 
         return out
@@ -578,66 +695,78 @@ class WavLMModel(ModelLoader):
 class WhisperModel(ModelLoader):
     """
     Whisper model from https://huggingface.co/openai/whisper-base
-    
+
     Please specify the model size ('tiny', 'base', 'small', 'medium', or 'large').
     """
-    def __init__(self, size: Literal['tiny', 'base', 'small', 'medium', 'large']):
+
+    def __init__(self, size: Literal["tiny", "base", "small", "medium", "large"]):
         dimensions = {
-            'tiny': 384,
-            'base': 512,
-            'small': 768,
-            'medium': 1024,
-            'large': 1280
+            "tiny": 384,
+            "base": 512,
+            "small": 768,
+            "medium": 1024,
+            "large": 1280,
         }
         model_dim = dimensions.get(size)
         model_identifier = f"whisper-{size}"
 
         super().__init__(model_identifier, model_dim, 16000)
         self.huggingface_id = f"openai/whisper-{size}"
-        
+
     def load_model(self):
         from transformers import AutoFeatureExtractor
         from transformers import WhisperModel
-        
+
         self.model = WhisperModel.from_pretrained(self.huggingface_id)
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained(self.huggingface_id)
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(
+            self.huggingface_id
+        )
         self.model.to(self.device)
 
     def _get_embedding(self, audio: np.ndarray) -> np.ndarray:
-        inputs = self.feature_extractor(audio, sampling_rate=self.sr, return_tensors="pt").to(self.device)
+        inputs = self.feature_extractor(
+            audio, sampling_rate=self.sr, return_tensors="pt"
+        ).to(self.device)
         input_features = inputs.input_features
-        decoder_input_ids = torch.tensor([[1, 1]]) * self.model.config.decoder_start_token_id
+        decoder_input_ids = (
+            torch.tensor([[1, 1]]) * self.model.config.decoder_start_token_id
+        )
         with torch.no_grad():
-            out = self.model(input_features, decoder_input_ids=decoder_input_ids).last_hidden_state # [1, timeframes, 512]
-            out = out.squeeze() # [timeframes, 384 or 512 or 768 or 1024 or 1280]
+            out = self.model(
+                input_features, decoder_input_ids=decoder_input_ids
+            ).last_hidden_state  # [1, timeframes, 512]
+            out = out.squeeze()  # [timeframes, 384 or 512 or 768 or 1024 or 1280]
 
         return out
 
 
-
 def get_all_models() -> list[ModelLoader]:
     ms = [
-        CLAPModel('2023'),
-        CLAPLaionModel('audio'), CLAPLaionModel('music'),
-        VGGishModel(), 
+        CLAPModel("2023"),
+        CLAPLaionModel("audio"),
+        CLAPLaionModel("music"),
+        VGGishModel(),
         *(MERTModel(layer=v) for v in range(1, 13)),
-        EncodecEmbModel('24k'), EncodecEmbModel('48k'), 
+        EncodecEmbModel("24k"),
+        EncodecEmbModel("48k"),
         # DACModel(),
         # CdpamModel('acoustic'), CdpamModel('content'),
-        *(W2V2Model('base', layer=v) for v in range(1, 13)),
-        *(W2V2Model('large', layer=v) for v in range(1, 25)),
-        *(HuBERTModel('base', layer=v) for v in range(1, 13)),
-        *(HuBERTModel('large', layer=v) for v in range(1, 25)),
-        *(WavLMModel('base', layer=v) for v in range(1, 13)),
-        *(WavLMModel('base-plus', layer=v) for v in range(1, 13)),
-        *(WavLMModel('large', layer=v) for v in range(1, 25)),
-        WhisperModel('tiny'), WhisperModel('small'),
-        WhisperModel('base'), WhisperModel('medium'),
-        WhisperModel('large'),
+        *(W2V2Model("base", layer=v) for v in range(1, 13)),
+        *(W2V2Model("large", layer=v) for v in range(1, 25)),
+        *(HuBERTModel("base", layer=v) for v in range(1, 13)),
+        *(HuBERTModel("large", layer=v) for v in range(1, 25)),
+        *(WavLMModel("base", layer=v) for v in range(1, 13)),
+        *(WavLMModel("base-plus", layer=v) for v in range(1, 13)),
+        *(WavLMModel("large", layer=v) for v in range(1, 25)),
+        WhisperModel("tiny"),
+        WhisperModel("small"),
+        WhisperModel("base"),
+        WhisperModel("medium"),
+        WhisperModel("large"),
     ]
     if importlib.util.find_spec("dac") is not None:
         ms.append(DACModel())
     if importlib.util.find_spec("cdpam") is not None:
-        ms += [CdpamModel('acoustic'), CdpamModel('content')]
+        ms += [CdpamModel("acoustic"), CdpamModel("content")]
 
     return ms

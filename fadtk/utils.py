@@ -38,10 +38,12 @@ def calculate_embd_statistics_online(
 
     # Initialize the mean and covariance matrix
     mu = np.zeros(embd_dim)
-    S = np.zeros((embd_dim, embd_dim))  # Sum of squares for online covariance computation
+    S = np.zeros(
+        (embd_dim, embd_dim)
+    )  # Sum of squares for online covariance computation
     n = 0  # Counter for total number of frames
 
-    results = pmap(_process_file, files, desc='Calculating statistics')
+    results = pmap(_process_file, files, desc="Calculating statistics")
     for _mu, _S, _n in results:
         delta = _mu - mu
         mu += _n / (n + _n) * delta
@@ -53,7 +55,7 @@ def calculate_embd_statistics_online(
     else:
         cov = S / (n - 1)  # compute the covariance matrix
         return mu, cov
-    
+
 
 def find_sox_formats(sox_path: str) -> list[str]:
     """
